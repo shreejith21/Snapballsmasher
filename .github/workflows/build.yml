@@ -18,13 +18,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Locate Android SDK Manager
+        run: |
+          SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "SDK manager not found"
+            exit 1
+          fi
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
+        run: yes | "$SDKMANAGER" --licenses || true
 
       - name: Install Android SDK
         run: |
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
+          "$SDKMANAGER" "platforms;android-35"
+          "$SDKMANAGER" "build-tools;35.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -35,4 +45,3 @@ jobs:
         with:
           name: SmartBallSmasher-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-          
