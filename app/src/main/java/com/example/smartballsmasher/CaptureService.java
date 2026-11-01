@@ -23,8 +23,22 @@ import android.util.DisplayMetrics;
 import android.view.WindowManager;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 public class CaptureService extends Service {
+
+    // Tunable settings (changed from MainActivity)
+    public static volatile float triggerY = 0.55f;   // fraction of screen height
+    public static volatile int burst = 3;            // taps per burst
+    public static volatile int gapMs = 80;           // gap between taps in a burst
+    public static volatile int cooldownMs = 700;     // min time between bursts
+    public static volatile int bursts = 0;
+
+    private static final int STEP = 3;
+    private static final int MAX_PTS = 6000;
+    private static final int MIN_PTS = 12;
+    private static final int MAX_MATCH = 1500;
+    private static final float FALL_SPEED = 250f;    // px/s downward
 
     private MediaProjection projection;
     private ImageReader reader;
@@ -33,12 +47,34 @@ public class CaptureService extends Service {
     private Handler handler;
 
     private int width, height, density;
-    private long lastTap = 0;
-    private float lastBallY = -1;
 
-    // Reused buffers (avoid per-frame allocation)
     private Bitmap frame;
     private int[] rowPixels;
+    private int[] prev;
+    private final int[] ptsX = new int[MAX_PTS];
+    private final int[] ptsY = new int[MAX_PTS];
+
+    // Ball tracking state
+    private boolean hasBall = false;
+    private float lastX, lastY, vyS;
+    private long lastBallT = 0;
+    private long lastTap = 0;
+
+    // Diagnostics
+    private long lastReport = 0;
+    private int frames = 0;
+    private int lastMatches = 0;
+
+    private Notification buildNotification(String text) {
+        return new Notification.Builder(this, "capture")
+            .setContentTitle("Smart Ball Smasher")
+            .setContentText(text)
+            .setStyle(new Notification.BigTextStyle().bigText(text))
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .build();
+    }
 
     @Override
     public void onCreate() {
@@ -48,14 +84,8 @@ public class CaptureService extends Service {
             "capture", "Game screen analysis", NotificationManager.IMPORTANCE_LOW);
         getSystemService(NotificationManager.class).createNotificationChannel(channel);
 
-        Notification notification = new Notification.Builder(this, "capture")
-            .setContentTitle("Smart Ball Smasher")
-            .setContentText("Analysing game screen")
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .build();
+        Notification notification = buildNotification("Starting...");
 
-        // Android 14+ requires the mediaProjection type to be declared before
-        // getMediaProjection() is called.
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(9, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
@@ -98,7 +128,32 @@ public class CaptureService extends Service {
         if (projection != null) { projection.stop(); projection = null; }
         if (frame != null) { frame.recycle(); frame = null; }
         rowPixels = null;
-        lastBallY = -1;
+        prev = null;
+        hasBall = false;
+        vyS = 0;
+    }
+
+    private void report() {
+        long now = System.currentTimeMillis();
+        if (now - lastReport < 1000) return;
+        lastReport = now;
+
+        String ball = hasBall
+            ? String.format("%.2f, %.2f", lastX / width, lastY / height)
+            : "none";
+
+        String text = "frames=" + frames
+            + "  moving-orange=" + lastMatches
+            + "\nball (x, y) = " + ball
+            + "  speed=" + (int) vyS + " px/s"
+            + "\ntrigger=" + String.format("%.2f", triggerY)
+            + "  burst=" + burst
+            + "  bursts sent=" + bursts
+            + "\ntaps ok=" + TapAccessibilityService.tapsOk
+            + "  fail=" + TapAccessibilityService.tapsFailed
+            + "  service=" + (TapAccessibilityService.get() != null ? "on" : "OFF");
+
+        getSystemService(NotificationManager.class).notify(9, buildNotification(text));
     }
 
     @Override
@@ -129,7 +184,6 @@ public class CaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        // Required on Android 14+ before createVirtualDisplay().
         projection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
@@ -156,6 +210,8 @@ public class CaptureService extends Service {
                 image = r.acquireLatestImage();
                 if (image == null) return;
 
+                frames++;
+
                 Image.Plane plane = image.getPlanes()[0];
                 ByteBuffer buffer = plane.getBuffer();
 
@@ -168,35 +224,14 @@ public class CaptureService extends Service {
                     if (frame != null) frame.recycle();
                     frame = Bitmap.createBitmap(bmpWidth, height, Bitmap.Config.ARGB_8888);
                     rowPixels = new int[bmpWidth];
+                    prev = null;
                 }
 
                 buffer.rewind();
                 frame.copyPixelsFromBuffer(buffer);
 
-                int[] ball = detectBall(frame);
-
-                if (ball != null) {
-
-                    float y = ball[1];
-                    long now = System.currentTimeMillis();
-
-                    boolean falling = lastBallY >= 0 && y > lastBallY + 3;
-
-                    if (falling && y > height * 0.68f && now - lastTap > 700) {
-
-                        TapAccessibilityService tapper = TapAccessibilityService.get();
-
-                        if (tapper != null) {
-                            tapper.tap(width * 0.50f, height * 0.945f);
-                            lastTap = now;
-                        }
-                    }
-
-                    lastBallY = y;
-
-                } else {
-                    lastBallY = -1;
-                }
+                processFrame(frame);
+                report();
 
             } catch (Exception e) {
                 e.printStackTrace();
@@ -209,48 +244,128 @@ public class CaptureService extends Service {
         return START_NOT_STICKY;
     }
 
-    private int[] detectBall(Bitmap bitmap) {
+    // Finds pixels that are orange AND changed since the previous frame
+    // (static orange scenery is ignored), tracks the ball, and fires a
+    // tap burst when the ball is falling below the trigger line.
+    private void processFrame(Bitmap bmp) {
 
-        long sumX = 0;
-        long sumY = 0;
-        int count = 0;
+        long now = System.currentTimeMillis();
+        int bw = bmp.getWidth();
 
-        int bw = bitmap.getWidth();
-        int xStart = (int) (width * 0.04);
-        int xEnd = Math.min((int) (width * 0.96), bw);
-        int yStart = (int) (height * 0.12);
-        int yEnd = (int) (height * 0.86);
+        int xStart = (int) (width * 0.03f);
+        int xEnd = Math.min((int) (width * 0.97f), bw);
+        int yStart = (int) (height * 0.10f);
+        int yEnd = (int) (height * 0.89f);
 
-        for (int y = yStart; y < yEnd; y += 3) {
+        int gw = (xEnd - xStart + STEP - 1) / STEP;
+        int gh = (yEnd - yStart + STEP - 1) / STEP;
 
-            // One bulk read per sampled row instead of per-pixel getPixel()
-            bitmap.getPixels(rowPixels, 0, bw, 0, y, bw, 1);
+        if (prev == null || prev.length != gw * gh) {
+            prev = new int[gw * gh];
+            Arrays.fill(prev, -1);
+        }
 
-            for (int x = xStart; x < xEnd; x += 3) {
+        int nPts = 0;
+        int matches = 0;
+        int gy = 0;
 
-                int color = rowPixels[x];
+        for (int y = yStart; y < yEnd; y += STEP, gy++) {
 
-                int red = (color >> 16) & 0xFF;
-                int green = (color >> 8) & 0xFF;
-                int blue = color & 0xFF;
+            bmp.getPixels(rowPixels, 0, bw, 0, y, bw, 1);
 
-                if (red > 175 &&
-                    green > 65 && green < 190 &&
-                    blue < 100 &&
-                    red > green * 1.22f) {
+            int gx = 0;
+            for (int x = xStart; x < xEnd; x += STEP, gx++) {
 
-                    sumX += x;
-                    sumY += y;
-                    count++;
+                int c = rowPixels[x];
+                int idx = gy * gw + gx;
+                int p = prev[idx];
+                prev[idx] = c & 0xFFFFFF;
+
+                int r = (c >> 16) & 0xFF;
+                int g = (c >> 8) & 0xFF;
+                int b = c & 0xFF;
+
+                if (p < 0) continue;
+                if (!(r > 150 && g > 40 && b < 90 && r > g * 1.25f)) continue;
+
+                int pr = (p >> 16) & 0xFF;
+                int pg = (p >> 8) & 0xFF;
+                int pb = p & 0xFF;
+
+                if (Math.abs(r - pr) + Math.abs(g - pg) + Math.abs(b - pb) < 60) continue;
+
+                matches++;
+                if (nPts < MAX_PTS) {
+                    ptsX[nPts] = x;
+                    ptsY[nPts] = y;
+                    nPts++;
                 }
             }
         }
 
-        if (count < 10 || count > width * height / 2500) {
-            return null;
+        lastMatches = matches;
+
+        // Forget the ball if it has not been seen for a while
+        if (hasBall && now - lastBallT > 500) {
+            hasBall = false;
+            vyS = 0;
         }
 
-        return new int[] { (int) (sumX / count), (int) (sumY / count) };
+        float cx = -1, cy = -1;
+
+        if (hasBall) {
+            // Follow the ball: only look near where it was
+            float gateX = width * 0.12f;
+            float gateY = width * 0.20f;
+            long sx = 0, sy = 0;
+            int n = 0;
+            for (int i = 0; i < nPts; i++) {
+                if (Math.abs(ptsX[i] - lastX) < gateX
+                        && Math.abs(ptsY[i] - lastY) < gateY) {
+                    sx += ptsX[i];
+                    sy += ptsY[i];
+                    n++;
+                }
+            }
+            if (n >= MIN_PTS) {
+                cx = (float) sx / n;
+                cy = (float) sy / n;
+            }
+        } else if (matches >= MIN_PTS && matches <= MAX_MATCH && nPts > 0) {
+            // Find the ball: centroid of all moving orange
+            long sx = 0, sy = 0;
+            for (int i = 0; i < nPts; i++) {
+                sx += ptsX[i];
+                sy += ptsY[i];
+            }
+            cx = (float) sx / nPts;
+            cy = (float) sy / nPts;
+        }
+
+        if (cx < 0) return;
+
+        if (hasBall) {
+            float dt = Math.max(5, now - lastBallT);
+            float vy = (cy - lastY) / dt * 1000f;
+            vyS = 0.5f * vyS + 0.5f * vy;
+        }
+
+        lastX = cx;
+        lastY = cy;
+        lastBallT = now;
+        hasBall = true;
+
+        if (vyS > FALL_SPEED
+                && cy > height * triggerY
+                && now - lastTap > cooldownMs) {
+
+            TapAccessibilityService tapper = TapAccessibilityService.get();
+            if (tapper != null) {
+                tapper.tapBurst(burst, gapMs);
+                bursts++;
+                lastTap = now;
+            }
+        }
     }
 
     @Override
