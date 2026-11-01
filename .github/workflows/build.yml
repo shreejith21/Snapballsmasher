@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -21,40 +20,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Locate Android SDK Manager
-        shell: bash
-        run: |
-          SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager | head -n 1)
-          if [ -z "$SDKMANAGER" ]; then
-            echo "Android SDK manager not found"
-            exit 1
-          fi
-          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: yes | "$SDKMANAGER" --licenses || true
-
-      - name: Install Android SDK
+      - name: Install SDK packages
         run: |
-          "$SDKMANAGER" "platforms;android-35"
-          "$SDKMANAGER" "build-tools;35.0.0"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Diagnose App Module
-        run: |
-          echo "===== PROJECTS ====="
-          gradle projects
-          echo "===== APP TASKS ====="
-          gradle :app:tasks --all
-          echo "===== APP BUILD FILE ====="
-          cat app/build.gradle
-          echo "===== ROOT BUILD FILE ====="
-          cat build.gradle
-          echo "===== SETTINGS FILE ====="
-          cat settings.gradle
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace
 
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartBallSmasher-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
