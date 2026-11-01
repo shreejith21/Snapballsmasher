@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Smart Ball Smasher</string>
+    <string name="accessibility_description">Lets Smart Ball Smasher perform a tap gesture at the bottom of the screen while you play. It does not read screen content.</string>
 </resources>
