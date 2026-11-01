@@ -45,11 +45,16 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build APK
-        run: gradle :app:assembleDebug
+      - name: Diagnose App Module
+        run: |
+          echo "===== PROJECTS ====="
+          gradle projects
+          echo "===== APP TASKS ====="
+          gradle :app:tasks --all
+          echo "===== APP BUILD FILE ====="
+          cat app/build.gradle
+          echo "===== ROOT BUILD FILE ====="
+          cat build.gradle
+          echo "===== SETTINGS FILE ====="
+          cat settings.gradle
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: SmartBallSmasher-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
