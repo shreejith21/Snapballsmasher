@@ -1,12 +1,14 @@
 package com.example.smartballsmasher;
 
-import android.app.*;
-import android.content.*;
-import android.media.projection.*;
-import android.os.*;
+import android.app.Activity;
+import android.content.Intent;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.Settings;
-import android.view.*;
-import android.widget.*;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 public class MainActivity extends Activity {
     private static final int REQUEST_CAPTURE = 71;
@@ -17,8 +19,8 @@ public class MainActivity extends Activity {
         super.onCreate(b);
 
         LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(1);
-        layout.setPadding(24, 24, 24, 24);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(48, 48, 48, 48);
 
         TextView title = new TextView(this);
         title.setText("🏀 Smart Ball Smasher");
@@ -34,16 +36,22 @@ public class MainActivity extends Activity {
         Button start = new Button(this);
         start.setText("Start screen detection");
         start.setOnClickListener(v -> {
+            if (TapAccessibilityService.get() == null) {
+                status.setText("Enable the tap accessibility service first");
+                return;
+            }
             MediaProjectionManager mpm =
-                (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
+                (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
             startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CAPTURE);
         });
         layout.addView(start);
 
         Button stop = new Button(this);
         stop.setText("Stop auto-player");
-        stop.setOnClickListener(v ->
-            stopService(new Intent(this, CaptureService.class)));
+        stop.setOnClickListener(v -> {
+            stopService(new Intent(this, CaptureService.class));
+            status.setText("Stopped");
+        });
         layout.addView(stop);
 
         status = new TextView(this);
@@ -57,17 +65,21 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
-        if (requestCode == REQUEST_CAPTURE && resultCode == RESULT_OK) {
-            Intent service = new Intent(this, CaptureService.class);
-            service.putExtra("resultCode", resultCode);
-            service.putExtra("data", data);
+        if (requestCode == REQUEST_CAPTURE) {
+            if (resultCode == RESULT_OK && data != null) {
+                Intent service = new Intent(this, CaptureService.class);
+                service.putExtra("resultCode", resultCode);
+                service.putExtra("data", data);
 
-            if (Build.VERSION.SDK_INT >= 26)
-                startForegroundService(service);
-            else
-                startService(service);
+                if (Build.VERSION.SDK_INT >= 26)
+                    startForegroundService(service);
+                else
+                    startService(service);
 
-            status.setText("Detection started");
+                status.setText("Detection started");
+            } else {
+                status.setText("Screen capture permission denied");
+            }
         }
     }
 }
