@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/AppTheme"
         android:label="Smart Ball Smasher"
         android:allowBackup="false">
 
